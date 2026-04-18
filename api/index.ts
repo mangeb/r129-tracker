@@ -2,6 +2,10 @@ import express from "express";
 import initSqlJs, { type Database } from "sql.js";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
@@ -27,6 +31,7 @@ async function getDb(): Promise<Database> {
   const possiblePaths = [
     path.join(process.cwd(), "data", "r129.db"),
     path.join(__dirname, "..", "data", "r129.db"),
+    path.join(__dirname, "data", "r129.db"),
     path.resolve("data", "r129.db"),
   ];
 
