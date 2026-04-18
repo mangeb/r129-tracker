@@ -4,3 +4,4 @@ r129.db
 !/data/r129.db
 .env
 .DS_Store
+.vercel

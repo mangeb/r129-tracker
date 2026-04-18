@@ -11,14 +11,40 @@ let db: Database | null = null;
 
 async function getDb(): Promise<Database> {
   if (db) return db;
-  const SQL = await initSqlJs();
 
-  // Try to load the seed database file
-  const dbPath = path.resolve(process.cwd(), "data", "r129.db");
-  if (fs.existsSync(dbPath)) {
-    const buffer = fs.readFileSync(dbPath);
-    db = new SQL.Database(buffer);
-  } else {
+  // sql.js needs to load its WASM file
+  const SQL = await initSqlJs({
+    // In Vercel, the WASM file is in node_modules
+    locateFile: (file: string) => {
+      const wasmPath = path.join(process.cwd(), "node_modules", "sql.js", "dist", file);
+      if (fs.existsSync(wasmPath)) return wasmPath;
+      // Fallback for bundled environments
+      return `https://sql.js.org/dist/${file}`;
+    }
+  });
+
+  // Try multiple paths to find the seed database
+  const possiblePaths = [
+    path.join(process.cwd(), "data", "r129.db"),
+    path.join(__dirname, "..", "data", "r129.db"),
+    path.resolve("data", "r129.db"),
+  ];
+
+  let loaded = false;
+  for (const dbPath of possiblePaths) {
+    try {
+      if (fs.existsSync(dbPath)) {
+        const buffer = fs.readFileSync(dbPath);
+        db = new SQL.Database(new Uint8Array(buffer));
+        loaded = true;
+        break;
+      }
+    } catch (e) {
+      // Try next path
+    }
+  }
+
+  if (!loaded) {
     // Fallback: create empty in-memory db with schema
     db = new SQL.Database();
     db.run(`
@@ -88,7 +114,7 @@ async function getDb(): Promise<Database> {
       );
     `);
   }
-  return db;
+  return db!;
 }
 
 function snakeToCamel(obj: Record<string, any>): Record<string, any> {
@@ -127,170 +153,246 @@ function getLastInsertId(database: Database): number {
 
 // === PHASES ===
 app.get("/api/phases", async (_req, res) => {
-  const database = await getDb();
-  res.json(queryAll(database, "SELECT * FROM phases ORDER BY \"order\" ASC"));
+  try {
+    const database = await getDb();
+    res.json(queryAll(database, 'SELECT * FROM phases ORDER BY "order" ASC'));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/phases", async (req, res) => {
-  const database = await getDb();
-  const { name, description, order, status, color } = req.body;
-  runSql(database, "INSERT INTO phases (name, description, \"order\", status, color) VALUES (?, ?, ?, ?, ?)",
-    [name, description || null, order || 0, status || "planned", color || "#d4a017"]);
-  const id = getLastInsertId(database);
-  res.json(queryOne(database, "SELECT * FROM phases WHERE id = ?", [id]));
+  try {
+    const database = await getDb();
+    const { name, description, order, status, color } = req.body;
+    runSql(database, 'INSERT INTO phases (name, description, "order", status, color) VALUES (?, ?, ?, ?, ?)',
+      [name, description || null, order || 0, status || "planned", color || "#d4a017"]);
+    const id = getLastInsertId(database);
+    res.json(queryOne(database, "SELECT * FROM phases WHERE id = ?", [id]));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.patch("/api/phases/:id", async (req, res) => {
-  const database = await getDb();
-  const id = Number(req.params.id);
-  const fields = req.body;
-  const sets = Object.keys(fields).map(k => {
-    const col = k === "order" ? '"order"' : k.replace(/[A-Z]/g, l => '_' + l.toLowerCase());
-    return `${col} = ?`;
-  }).join(", ");
-  const vals = Object.values(fields);
-  runSql(database, `UPDATE phases SET ${sets} WHERE id = ?`, [...vals, id]);
-  const phase = queryOne(database, "SELECT * FROM phases WHERE id = ?", [id]);
-  phase ? res.json(phase) : res.status(404).json({ message: "Not found" });
+  try {
+    const database = await getDb();
+    const id = Number(req.params.id);
+    const fields = req.body;
+    const sets = Object.keys(fields).map(k => {
+      const col = k === "order" ? '"order"' : k.replace(/[A-Z]/g, l => '_' + l.toLowerCase());
+      return `${col} = ?`;
+    }).join(", ");
+    const vals = Object.values(fields);
+    runSql(database, `UPDATE phases SET ${sets} WHERE id = ?`, [...vals, id]);
+    const phase = queryOne(database, "SELECT * FROM phases WHERE id = ?", [id]);
+    phase ? res.json(phase) : res.status(404).json({ message: "Not found" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete("/api/phases/:id", async (req, res) => {
-  const database = await getDb();
-  const id = Number(req.params.id);
-  runSql(database, "DELETE FROM tasks WHERE phase_id = ?", [id]);
-  runSql(database, "DELETE FROM phases WHERE id = ?", [id]);
-  res.json({ success: true });
+  try {
+    const database = await getDb();
+    const id = Number(req.params.id);
+    runSql(database, "DELETE FROM tasks WHERE phase_id = ?", [id]);
+    runSql(database, "DELETE FROM phases WHERE id = ?", [id]);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === TASKS ===
 app.get("/api/tasks", async (_req, res) => {
-  const database = await getDb();
-  res.json(queryAll(database, "SELECT * FROM tasks"));
+  try {
+    const database = await getDb();
+    res.json(queryAll(database, "SELECT * FROM tasks"));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/tasks", async (req, res) => {
-  const database = await getDb();
-  const { title, description, phaseId, status, priority, estimatedCost, notes, category, createdAt } = req.body;
-  runSql(database, "INSERT INTO tasks (title, description, phase_id, status, priority, estimated_cost, notes, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [title, description || null, phaseId, status || "todo", priority || "medium", estimatedCost || null, notes || null, category || null, createdAt || new Date().toISOString()]);
-  const id = getLastInsertId(database);
-  res.json(queryOne(database, "SELECT * FROM tasks WHERE id = ?", [id]));
+  try {
+    const database = await getDb();
+    const { title, description, phaseId, status, priority, estimatedCost, notes, category, createdAt } = req.body;
+    runSql(database, "INSERT INTO tasks (title, description, phase_id, status, priority, estimated_cost, notes, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [title, description || null, phaseId, status || "todo", priority || "medium", estimatedCost || null, notes || null, category || null, createdAt || new Date().toISOString()]);
+    const id = getLastInsertId(database);
+    res.json(queryOne(database, "SELECT * FROM tasks WHERE id = ?", [id]));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.patch("/api/tasks/:id", async (req, res) => {
-  const database = await getDb();
-  const id = Number(req.params.id);
-  const fields = req.body;
-  const colMap: Record<string, string> = {
-    phaseId: "phase_id", estimatedCost: "estimated_cost", actualCost: "actual_cost",
-    createdAt: "created_at", completedAt: "completed_at"
-  };
-  const sets = Object.keys(fields).map(k => `${colMap[k] || k} = ?`).join(", ");
-  const vals = Object.values(fields);
-  runSql(database, `UPDATE tasks SET ${sets} WHERE id = ?`, [...vals, id]);
-  const task = queryOne(database, "SELECT * FROM tasks WHERE id = ?", [id]);
-  task ? res.json(task) : res.status(404).json({ message: "Not found" });
+  try {
+    const database = await getDb();
+    const id = Number(req.params.id);
+    const fields = req.body;
+    const colMap: Record<string, string> = {
+      phaseId: "phase_id", estimatedCost: "estimated_cost", actualCost: "actual_cost",
+      createdAt: "created_at", completedAt: "completed_at"
+    };
+    const sets = Object.keys(fields).map(k => `${colMap[k] || k} = ?`).join(", ");
+    const vals = Object.values(fields);
+    runSql(database, `UPDATE tasks SET ${sets} WHERE id = ?`, [...vals, id]);
+    const task = queryOne(database, "SELECT * FROM tasks WHERE id = ?", [id]);
+    task ? res.json(task) : res.status(404).json({ message: "Not found" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete("/api/tasks/:id", async (req, res) => {
-  const database = await getDb();
-  runSql(database, "DELETE FROM tasks WHERE id = ?", [Number(req.params.id)]);
-  res.json({ success: true });
+  try {
+    const database = await getDb();
+    runSql(database, "DELETE FROM tasks WHERE id = ?", [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === PARTS ===
 app.get("/api/parts", async (_req, res) => {
-  const database = await getDb();
-  res.json(queryAll(database, "SELECT * FROM parts"));
+  try {
+    const database = await getDb();
+    res.json(queryAll(database, "SELECT * FROM parts"));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/parts", async (req, res) => {
-  const database = await getDb();
-  const { name, partNumber, category, vendor, vendorUrl, estimatedPrice, notes, isOem, status } = req.body;
-  runSql(database, "INSERT INTO parts (name, part_number, category, vendor, vendor_url, estimated_price, notes, is_oem, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [name, partNumber || null, category, vendor || null, vendorUrl || null, estimatedPrice || null, notes || null, isOem ? 1 : 0, status || "needed"]);
-  const id = getLastInsertId(database);
-  res.json(queryOne(database, "SELECT * FROM parts WHERE id = ?", [id]));
+  try {
+    const database = await getDb();
+    const { name, partNumber, category, vendor, vendorUrl, estimatedPrice, notes, isOem, status } = req.body;
+    runSql(database, "INSERT INTO parts (name, part_number, category, vendor, vendor_url, estimated_price, notes, is_oem, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [name, partNumber || null, category, vendor || null, vendorUrl || null, estimatedPrice || null, notes || null, isOem ? 1 : 0, status || "needed"]);
+    const id = getLastInsertId(database);
+    res.json(queryOne(database, "SELECT * FROM parts WHERE id = ?", [id]));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.patch("/api/parts/:id", async (req, res) => {
-  const database = await getDb();
-  const id = Number(req.params.id);
-  const fields = req.body;
-  const colMap: Record<string, string> = {
-    partNumber: "part_number", vendorUrl: "vendor_url", estimatedPrice: "estimated_price",
-    actualPrice: "actual_price", isOem: "is_oem", taskId: "task_id"
-  };
-  const sets = Object.keys(fields).map(k => `${colMap[k] || k} = ?`).join(", ");
-  const vals = Object.values(fields).map(v => v === true ? 1 : v === false ? 0 : v);
-  runSql(database, `UPDATE parts SET ${sets} WHERE id = ?`, [...vals, id]);
-  const part = queryOne(database, "SELECT * FROM parts WHERE id = ?", [id]);
-  part ? res.json(part) : res.status(404).json({ message: "Not found" });
+  try {
+    const database = await getDb();
+    const id = Number(req.params.id);
+    const fields = req.body;
+    const colMap: Record<string, string> = {
+      partNumber: "part_number", vendorUrl: "vendor_url", estimatedPrice: "estimated_price",
+      actualPrice: "actual_price", isOem: "is_oem", taskId: "task_id"
+    };
+    const sets = Object.keys(fields).map(k => `${colMap[k] || k} = ?`).join(", ");
+    const vals = Object.values(fields).map(v => v === true ? 1 : v === false ? 0 : v);
+    runSql(database, `UPDATE parts SET ${sets} WHERE id = ?`, [...vals, id]);
+    const part = queryOne(database, "SELECT * FROM parts WHERE id = ?", [id]);
+    part ? res.json(part) : res.status(404).json({ message: "Not found" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete("/api/parts/:id", async (req, res) => {
-  const database = await getDb();
-  runSql(database, "DELETE FROM parts WHERE id = ?", [Number(req.params.id)]);
-  res.json({ success: true });
+  try {
+    const database = await getDb();
+    runSql(database, "DELETE FROM parts WHERE id = ?", [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === KNOWLEDGE BASE ===
 app.get("/api/knowledge", async (_req, res) => {
-  const database = await getDb();
-  res.json(queryAll(database, "SELECT * FROM knowledge_base"));
+  try {
+    const database = await getDb();
+    res.json(queryAll(database, "SELECT * FROM knowledge_base"));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/knowledge", async (req, res) => {
-  const database = await getDb();
-  const { title, content, category, tags, sourceUrl, createdAt } = req.body;
-  runSql(database, "INSERT INTO knowledge_base (title, content, category, tags, source_url, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [title, content, category, tags || null, sourceUrl || null, createdAt || new Date().toISOString()]);
-  const id = getLastInsertId(database);
-  res.json(queryOne(database, "SELECT * FROM knowledge_base WHERE id = ?", [id]));
+  try {
+    const database = await getDb();
+    const { title, content, category, tags, sourceUrl, createdAt } = req.body;
+    runSql(database, "INSERT INTO knowledge_base (title, content, category, tags, source_url, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [title, content, category, tags || null, sourceUrl || null, createdAt || new Date().toISOString()]);
+    const id = getLastInsertId(database);
+    res.json(queryOne(database, "SELECT * FROM knowledge_base WHERE id = ?", [id]));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete("/api/knowledge/:id", async (req, res) => {
-  const database = await getDb();
-  runSql(database, "DELETE FROM knowledge_base WHERE id = ?", [Number(req.params.id)]);
-  res.json({ success: true });
+  try {
+    const database = await getDb();
+    runSql(database, "DELETE FROM knowledge_base WHERE id = ?", [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === EXPENSES ===
 app.get("/api/expenses", async (_req, res) => {
-  const database = await getDb();
-  res.json(queryAll(database, "SELECT * FROM expenses"));
+  try {
+    const database = await getDb();
+    res.json(queryAll(database, "SELECT * FROM expenses"));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/expenses", async (req, res) => {
-  const database = await getDb();
-  const { description, amount, vendor, date, category } = req.body;
-  runSql(database, "INSERT INTO expenses (description, amount, vendor, date, category) VALUES (?, ?, ?, ?, ?)",
-    [description, amount, vendor || null, date, category]);
-  const id = getLastInsertId(database);
-  res.json(queryOne(database, "SELECT * FROM expenses WHERE id = ?", [id]));
+  try {
+    const database = await getDb();
+    const { description, amount, vendor, date, category } = req.body;
+    runSql(database, "INSERT INTO expenses (description, amount, vendor, date, category) VALUES (?, ?, ?, ?, ?)",
+      [description, amount, vendor || null, date, category]);
+    const id = getLastInsertId(database);
+    res.json(queryOne(database, "SELECT * FROM expenses WHERE id = ?", [id]));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete("/api/expenses/:id", async (req, res) => {
-  const database = await getDb();
-  runSql(database, "DELETE FROM expenses WHERE id = ?", [Number(req.params.id)]);
-  res.json({ success: true });
+  try {
+    const database = await getDb();
+    runSql(database, "DELETE FROM expenses WHERE id = ?", [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === DASHBOARD ===
 app.get("/api/dashboard", async (_req, res) => {
-  const database = await getDb();
-  const allTasks = queryAll(database, "SELECT * FROM tasks");
-  const allParts = queryAll(database, "SELECT * FROM parts");
-  const allExpenses = queryAll(database, "SELECT * FROM expenses");
+  try {
+    const database = await getDb();
+    const allTasks = queryAll(database, "SELECT * FROM tasks");
+    const allParts = queryAll(database, "SELECT * FROM parts");
+    const allExpenses = queryAll(database, "SELECT * FROM expenses");
 
-  res.json({
-    totalTasks: allTasks.length,
-    completedTasks: allTasks.filter((t: any) => t.status === "completed").length,
-    totalBudget: allTasks.reduce((sum: number, t: any) => sum + (t.estimated_cost || 0), 0),
-    totalSpent: allExpenses.reduce((sum: number, e: any) => sum + e.amount, 0),
-    partsNeeded: allParts.filter((p: any) => p.status === "needed").length,
-    partsReceived: allParts.filter((p: any) => p.status === "received" || p.status === "installed").length,
-  });
+    res.json({
+      totalTasks: allTasks.length,
+      completedTasks: allTasks.filter((t: any) => t.status === "completed").length,
+      totalBudget: allTasks.reduce((sum: number, t: any) => sum + (t.estimatedCost || 0), 0),
+      totalSpent: allExpenses.reduce((sum: number, e: any) => sum + e.amount, 0),
+      partsNeeded: allParts.filter((p: any) => p.status === "needed").length,
+      partsReceived: allParts.filter((p: any) => p.status === "received" || p.status === "installed").length,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 export default app;
